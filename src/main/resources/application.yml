@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: agent-harness
+
+  datasource:
+    # ${NAME:default} = read the environment variable NAME, or use the default for local dev
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/agent_harness}
+    username: ${DB_USER:harness}
+    password: ${DB_PASSWORD:harness}
+
+  jpa:
+    hibernate:
+      # Flyway owns the schema; Hibernate only checks that entities match the tables
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    locations: classpath:db/migration
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
