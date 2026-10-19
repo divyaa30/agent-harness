@@ -32,19 +32,21 @@ public class AgentStep {
     private String toolCalls;
 
     private String toolCallId;
+    private int tokens;
     private Instant createdAt;
 
     protected AgentStep() {
         // for JPA
     }
 
-    public AgentStep(UUID runId, int seq, String role, String content, String toolCalls, String toolCallId) {
+    public AgentStep(UUID runId, int seq, String role, String content, String toolCalls, String toolCallId, int tokens) {
         this.runId = runId;
         this.seq = seq;
         this.role = role;
         this.content = content;
         this.toolCalls = toolCalls;
         this.toolCallId = toolCallId;
+        this.tokens = tokens;
         this.createdAt = Instant.now();
     }
 
@@ -54,5 +56,6 @@ public class AgentStep {
     public String getContent() { return content; }
     public String getToolCalls() { return toolCalls; }
     public String getToolCallId() { return toolCallId; }
+    public int getTokens() { return tokens; }
     public Instant getCreatedAt() { return createdAt; }
 }

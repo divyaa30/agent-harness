@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -30,11 +31,15 @@ public class RunController {
         this.steps = steps;
     }
 
-    /** Starts an investigation. For now it waits until the agent finishes (S3 makes this asynchronous). */
+    /**
+     * Accepts an investigation and replies immediately with 202 Accepted.
+     * A background worker runs it; poll GET /runs/{id} to follow progress.
+     */
     @PostMapping
+    @ResponseStatus(HttpStatus.ACCEPTED)
     public RunView start(@Valid @RequestBody StartRunRequest request) {
-        AgentRun run = runService.startAndRun(request.incident());
-        return RunView.of(run, steps.findByRunIdOrderBySeq(run.getId()));
+        AgentRun run = runService.createRun(request.incident());
+        return RunView.of(run, List.of());
     }
 
     /** Shows a saved investigation with every step. */
