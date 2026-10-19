@@ -9,8 +9,8 @@ every step, and enforces the limits. That runtime is the focus of the project: m
 reliable, observable and safe enough for backend systems.
 
 > **Status:** in active development. The agent, its tools, step persistence, asynchronous
-> execution through Kafka and crash recovery are done. Retries and budgets are next.
-> See the [roadmap](#roadmap).
+> execution through Kafka, crash recovery, retries, budgets and loop detection are done.
+> A human approval gate is next. See the [roadmap](#roadmap).
 
 ---
 
@@ -82,8 +82,22 @@ repeat (at most 10 model calls):
   possible.
 - **Tool errors don't crash the run.** They go back to the model as text, so it can correct
   itself.
-- **Hard limits:** at most 10 model calls per run (counting calls made before a crash), a
-  60s timeout per model call, and capped tool output.
+- **Hard limits:** see [Resilience and limits](#resilience-and-limits).
+
+### Resilience and limits
+
+| Mechanism | What it does |
+|---|---|
+| **Retry with backoff** | `RetryingLlmClient` wraps the real client (decorator pattern) and retries `429`, `5xx` and timeouts up to 5 times with exponential backoff and jitter, never waiting less than the provider asks (`Retry-After` or "try again in …"). `401` and `400` fail immediately. Three back-to-back runs that used to fail with `429` on the free tier now all complete. |
+| **Model-call limit** | At most 10 model calls per run, counting calls made before a crash |
+| **Token budget** | 30,000 tokens per run by default, including tokens spent before a crash. Checked before each model call, so a run can overshoot by at most one call |
+| **Time budget** | 3 minutes per processing attempt by default |
+| **Loop detection** | An exact repeat of an earlier tool call (same tool, same inputs, keys sorted) isn't run again. The model is nudged to try something else, and a third repeat stops the run |
+| **Stuck-run sweeper** | Saving a run and publishing it to Kafka are two writes. If the app dies between them, `RunSweeper` re-queues runs left `PENDING` for over 2 minutes. This is safe because processing is idempotent (a lighter alternative to the outbox pattern) |
+| **Other limits** | 60s timeout per model call; tool output capped at 15 lines |
+
+When a limit is hit, the run ends as `FAILED` with the reason, for example
+`Stopped: used 3378 tokens, over the budget of 3000`.
 
 ### Asynchronous runs and crash recovery
 
@@ -165,8 +179,9 @@ export LLM_API_KEY=your-key
 ```
 
 Optional settings (environment variables): `LLM_BASE_URL`, `LLM_MODEL`, `DB_URL`, `DB_USER`,
-`DB_PASSWORD`, `KAFKA_BOOTSTRAP_SERVERS`, and `AGENT_STEP_DELAY` (for example `8s`, which slows
-runs down so you can kill the app mid-run and watch it resume).
+`DB_PASSWORD`, `KAFKA_BOOTSTRAP_SERVERS`, `AGENT_MAX_TOKENS`, `AGENT_MAX_DURATION`, and
+`AGENT_STEP_DELAY` (for example `8s`, which slows runs down so you can kill the app mid-run
+and watch it resume).
 
 ### API
 
@@ -188,11 +203,14 @@ curl -X POST http://localhost:8080/runs \
 
 ```
 src/main/java/com/divya/agentharness/
-├── agent/   AgentLoop: the ask → run tools → repeat loop, and the investigation instructions
-├── llm/     LlmClient interface, OpenAI-compatible client, message and tool-call types
+├── agent/   AgentLoop: the ask → run tools → repeat loop, budgets, loop detection, and the
+│            investigation instructions
+├── llm/     LlmClient interface, OpenAI-compatible client, RetryingLlmClient (backoff),
+│            message and tool-call types
 ├── tools/   The three investigation tools, the tool registry and the service catalog
 └── run/     Run and step persistence (JPA), RunService (queue, process, resume),
-             RunWorker (Kafka consumer), the agent-runs topic and the /runs REST API
+             RunWorker (Kafka consumer), RunSweeper (re-queues stuck runs),
+             the agent-runs topic and the /runs REST API
 
 src/main/resources/db/migration/
 ├── V1  agent_runs table
@@ -214,7 +232,7 @@ investigation principle**. No incident-specific hints were added.
 | The agent invented a service name that doesn't exist | The real service catalog is loaded into the instructions |
 | It wandered across dates and reported the day's biggest incident, not the reported one | Stay within the reported date and time of day; low temperature (0.1) for consistency |
 | It found the symptom ("OTP delayed") and guessed the cause | Search all log levels shortly before the errors begin; separate symptom from cause |
-| `429 Too Many Requests` from the provider's rate limit | Planned: retry with backoff |
+| `429 Too Many Requests` from the provider's rate limit failed whole runs | Retry with exponential backoff that respects the provider's suggested wait |
 | Grouping logs by raw message failed (every line had a unique ID) | `search_logs` normalises numbers into patterns. Trade-off: it also masks useful numbers like broker IDs |
 | Searched for "timeout" when the log said "timed out", found nothing, and blamed the wrong incident | Open: a search-quality issue to be measured and fixed with the evaluation suite |
 
@@ -232,8 +250,12 @@ To guard against overfitting the instructions to the known incidents, the evalua
 - [x] Every run and step saved; `POST /runs` and `GET /runs/{id}`
 - [x] **Asynchronous runs via Kafka**: `POST /runs` returns immediately, and workers process runs
 - [x] **Crash recovery**: a run interrupted mid-investigation resumes from its last saved step
-- [ ] Retries with backoff, idempotent tool calls, token and time budgets, loop detection
-- [ ] Human approval gate for risky actions; live progress streaming (SSE)
+- [x] Retries with exponential backoff and jitter for temporary LLM errors
+- [x] Token and time budgets per run
+- [x] Loop detection for repeated tool calls (automated test coming with the test suite)
+- [x] Sweeper for runs stuck between the database and Kafka
+- [ ] Human approval gate for risky actions, with idempotent execution of write tools
+- [ ] Live progress streaming (SSE)
 - [ ] Integration tests with Testcontainers and a fake LLM
 - [ ] Evaluation suite: accuracy on tuned and held-out incidents, steps and tokens per run
 - [ ] Metrics dashboard, load test and chaos test (killing workers under load)
