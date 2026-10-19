@@ -2,6 +2,7 @@ package com.divya.agentharness.agent;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 import com.divya.agentharness.llm.ChatMessage;
 import com.divya.agentharness.llm.LlmClient;
@@ -63,12 +64,16 @@ public class AgentLoop {
         this.serviceCatalog = serviceCatalog;
     }
 
-    public AgentResult investigate(String incident) {
+    /**
+     * @param onMessage called with every message the moment it joins the conversation,
+     *                  so the caller can save it before the next step starts
+     */
+    public AgentResult investigate(String incident, Consumer<ChatMessage> onMessage) {
         // The model has no memory between calls, so this list IS the memory:
         // every call sends the whole conversation so far.
         List<ChatMessage> conversation = new ArrayList<>();
-        conversation.add(ChatMessage.system(SYSTEM_PROMPT.formatted(serviceCatalog.describe())));
-        conversation.add(ChatMessage.user(incident));
+        addMessage(conversation, ChatMessage.system(SYSTEM_PROMPT.formatted(serviceCatalog.describe())), onMessage);
+        addMessage(conversation, ChatMessage.user(incident), onMessage);
 
         List<String> trace = new ArrayList<>();
         int toolCalls = 0;
@@ -77,7 +82,7 @@ public class AgentLoop {
         for (int llmCall = 1; llmCall <= MAX_LLM_CALLS; llmCall++) {
             LlmResponse response = llmClient.chat(conversation, toolRegistry.specs());
             tokens += response.promptTokens() + response.completionTokens();
-            conversation.add(response.message());
+            addMessage(conversation, response.message(), onMessage);
 
             // No tool requests means the model has given its final answer.
             if (!response.wantsTools()) {
@@ -94,12 +99,18 @@ public class AgentLoop {
                 trace.add(step);
 
                 String result = toolRegistry.execute(call);
-                conversation.add(ChatMessage.toolResult(call.id(), result));
+                addMessage(conversation, ChatMessage.toolResult(call.id(), result), onMessage);
             }
         }
 
         log.warn("Investigation stopped: hit the limit of {} model calls", MAX_LLM_CALLS);
         return new AgentResult(false, "Stopped: reached the limit of " + MAX_LLM_CALLS + " model calls without an answer.",
                 trace, MAX_LLM_CALLS, toolCalls, tokens);
+    }
+
+    /** Every message goes through here: reported to the listener (to be saved), then remembered. */
+    private static void addMessage(List<ChatMessage> conversation, ChatMessage message, Consumer<ChatMessage> onMessage) {
+        onMessage.accept(message);
+        conversation.add(message);
     }
 }
