@@ -12,11 +12,13 @@ KILL_AFTER="${KILL_AFTER:-10}"
 start_app
 SINCE=$(sql "select now()")
 echo "Queueing $RUNS runs..."
+pids=()
 for _ in $(seq 1 "$RUNS"); do
   curl -s -o /dev/null -X POST http://localhost:8080/runs -H 'Content-Type: application/json' \
     -d '{"incident":"Chaos test: customers could not open accounts on 15 October 2026 in the morning."}' &
+  pids+=($!)
 done
-wait
+wait "${pids[@]}"   # only the requests: a bare `wait` would also wait for the app itself
 
 sleep "$KILL_AFTER"
 echo "Killing the app (hard) after ${KILL_AFTER}s..."

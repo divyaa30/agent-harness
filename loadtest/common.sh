@@ -2,13 +2,17 @@
 # Shared helpers for the load and chaos tests (Git Bash on Windows, or any bash).
 set -euo pipefail
 
-export MSYS_NO_PATHCONV=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JAR="$ROOT/target/agent-harness-0.0.1-SNAPSHOT.jar"
+if command -v cygpath > /dev/null; then
+  JAR="$(cygpath -w "$JAR")"   # Git Bash on Windows: java needs C:\... not /c/...
+fi
 APP_LOG="${APP_LOG:-$ROOT/target/loadtest-app.log}"
 
 sql() {
-  docker exec agent-harness-postgres psql -U harness -d agent_harness -tAc "$1"
+  # MSYS_NO_PATHCONV: stop Git Bash rewriting arguments that look like paths (only here,
+  # because elsewhere, such as curl's /dev/null, that rewriting is needed).
+  MSYS_NO_PATHCONV=1 docker exec agent-harness-postgres psql -U harness -d agent_harness -tAc "$1"
 }
 
 start_app() {
