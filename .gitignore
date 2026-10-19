@@ -34,3 +34,6 @@ build/
 
 ### Secrets ###
 .env
+
+### Personal study notes ###
+notes/
