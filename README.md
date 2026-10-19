@@ -9,8 +9,9 @@ every step, and enforces the limits. That runtime is the focus of the project: m
 reliable, observable and safe enough for backend systems.
 
 > **Status:** in active development. The agent, its tools, step persistence, asynchronous
-> execution through Kafka, crash recovery, retries, budgets and loop detection are done.
-> A human approval gate is next. See the [roadmap](#roadmap).
+> execution through Kafka, crash recovery, retries, budgets, loop detection, a human approval
+> gate for risky actions and live progress streaming are done. Automated tests and an
+> evaluation suite are next. See the [roadmap](#roadmap).
 
 ---
 
@@ -36,7 +37,18 @@ Step 4  get_recent_deploys     otp-service             → no deployments
 > No deployment was involved.
 
 `POST /runs` replies immediately with `202 Accepted` and a run id. A background worker does
-the investigation, and `GET /runs/{id}` shows its status and the full trace of every step.
+the investigation. `GET /runs/{id}/stream` shows each step live as it happens, and
+`GET /runs/{id}` shows the status and the full trace.
+
+When the problem is **still ongoing** and a deployment is clearly the cause, the agent proposes
+a fix, and the run **pauses until a human approves it**:
+
+```
+Step 5  get_recent_deploys    notification-service 1.9.0 at 19:30, nothing since
+⏸       rollback_deployment   notification-service → 1.8.0   status: WAITING_APPROVAL
+        POST /runs/{id}/approve {"decidedBy": "divya"}
+Step 6  (approved by divya)   ROLLED BACK notification-service to 1.8.0
+```
 
 ---
 
@@ -56,8 +68,12 @@ flowchart LR
     TR --> T1[get_application_stats]
     TR --> T2[search_logs]
     TR --> T3[get_recent_deploys]
-    T1 & T2 & T3 --> BANK[(Fake bank data<br/>Postgres)]
+    TR --> T4[rollback_deployment<br/>needs approval]
+    T1 & T2 & T3 & T4 --> BANK[(Fake bank data<br/>Postgres)]
     LOOP -->|every step, as it happens| DB
+    LOOP -.->|risky call: pause| H{{Human:<br/>approve / reject}}
+    H -.->|decision re-queues the run| K
+    DB -.->|live steps| SSE[GET /runs/id/stream]
     W -.->|commit offset<br/>only when finished| K
 ```
 
@@ -99,6 +115,37 @@ repeat (at most 10 model calls):
 When a limit is hit, the run ends as `FAILED` with the reason, for example
 `Stopped: used 3378 tokens, over the budget of 3000`.
 
+### Human approval for risky actions
+
+Every tool except one only reads. `rollback_deployment` changes production, so it is marked
+**requires approval**:
+
+1. When the model asks for it, the harness doesn't run it. It records an approval request,
+   marks the run `WAITING_APPROVAL`, and frees the worker. Nobody blocks while a human decides,
+   so a decision can take hours without upsetting Kafka.
+2. `POST /runs/{id}/approve` or `/reject` (a reason is required to reject) records the decision
+   with a conditional update, so only one decision can win and a second click gets `409 Conflict`.
+   It then re-queues the run.
+3. The worker resumes the run, which is the same resume logic used after a crash. An approved
+   call runs. For a rejected one, the model is told it was rejected and why, and writes its
+   report with an alternative.
+
+**Idempotent writes.** The rollback stores the model's tool call id as a unique key
+(`INSERT … ON CONFLICT (idempotency_key) DO NOTHING`). If a crash makes the harness run the
+same approved call again, the second attempt changes nothing. The tool also refuses to roll back
+to a version the service never ran.
+
+Verified: approve (rollback applied once, run completed), second approve (`409`), replaying the
+same rollback (`INSERT 0 0`, still one rollback), reject without a reason (`400`), and reject
+with a reason (no rollback; the agent's report adopted the team's alternative fix).
+
+### Live progress
+
+`GET /runs/{id}/stream` uses Server-Sent Events. It replays the steps saved so far, then pushes
+every new step and status change the moment it's saved, and closes when the run completes or
+fails. Watchers are held in memory, so this serves clients connected to the instance running the
+worker. Several instances would need a shared channel (a Kafka topic or Redis pub/sub) in between.
+
 ### Asynchronous runs and crash recovery
 
 `POST /runs` saves the run as `PENDING`, publishes its id to the `agent-runs` Kafka topic
@@ -128,7 +175,7 @@ Real production data can't be used, so the project includes a deterministic **fa
 (Flyway migrations V2–V3): one busy day of an account-opening journey across five
 microservices, with ~11,700 log lines, ~1,400 customer applications and the deployment history.
 
-Five incidents of different kinds are planted in it, plus a red-herring deployment:
+Six incidents of different kinds are planted in it, plus a red-herring deployment:
 
 | Type | Clues the agent must connect |
 |---|---|
@@ -137,6 +184,7 @@ Five incidents of different kinds are planted in it, plus a red-herring deployme
 | External API outage | Upstream timeouts, with no change on our side |
 | Kafka broker outage | Broker warning → consumer lag → delayed OTPs |
 | Configuration typo | A config change, then valid customers rejected |
+| Bad deployment, **still ongoing** | Errors start with a deploy and never stop. Account stats look normal, so only the logs show it. The right fix is a rollback |
 
 The data is generated without randomness, so the agent can be evaluated against a known
 answer key, with the same exam every time.
@@ -188,7 +236,10 @@ and watch it resume).
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/runs` | Queue an investigation. Body: `{"incident": "..."}`. Returns `202 Accepted` with the run id |
-| `GET` | `/runs/{id}` | A run's status (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`), final answer, token usage and every step |
+| `GET` | `/runs/{id}` | A run's status (`PENDING`, `RUNNING`, `WAITING_APPROVAL`, `COMPLETED`, `FAILED`), final answer, token usage, approval requests and every step |
+| `GET` | `/runs/{id}/stream` | Live progress (Server-Sent Events): saved steps, then each new step and status change |
+| `POST` | `/runs/{id}/approve` | Approve the risky action a run is waiting on. Body: `{"decidedBy": "...", "reason": "..."}` |
+| `POST` | `/runs/{id}/reject` | Reject it. Body: `{"decidedBy": "...", "reason": "..."}` (reason required) |
 | `GET` | `/actuator/health` | Health check |
 
 ```bash
@@ -207,17 +258,20 @@ src/main/java/com/divya/agentharness/
 │            investigation instructions
 ├── llm/     LlmClient interface, OpenAI-compatible client, RetryingLlmClient (backoff),
 │            message and tool-call types
-├── tools/   The three investigation tools, the tool registry and the service catalog
+├── tools/   The three read-only investigation tools, rollback_deployment (approval-gated,
+│            idempotent), the tool registry and the service catalog
 └── run/     Run and step persistence (JPA), RunService (queue, process, resume),
              RunWorker (Kafka consumer), RunSweeper (re-queues stuck runs),
-             the agent-runs topic and the /runs REST API
+             ApprovalService (human decisions), RunEvents (SSE), the agent-runs
+             topic and the /runs REST API
 
 src/main/resources/db/migration/
 ├── V1  agent_runs table
 ├── V2  fake bank tables (services, deployments, app_logs, account_applications)
 ├── V3  one day of fake bank data with five planted incidents
 ├── V4  agent_steps table and run token totals
-└── V5  tokens per step (correct totals across a resume)
+├── V5  tokens per step (correct totals across a resume)
+└── V6  tool_approvals, idempotency keys on deployments, and the ongoing sixth incident
 ```
 
 ---
@@ -235,6 +289,8 @@ investigation principle**. No incident-specific hints were added.
 | `429 Too Many Requests` from the provider's rate limit failed whole runs | Retry with exponential backoff that respects the provider's suggested wait |
 | Grouping logs by raw message failed (every line had a unique ID) | `search_logs` normalises numbers into patterns. Trade-off: it also masks useful numbers like broker IDs |
 | Searched for "timeout" when the log said "timed out", found nothing, and blamed the wrong incident | Open: a search-quality issue to be measured and fixed with the evaluation suite |
+| Diagnosed the ongoing incident correctly but only *suggested* a rollback in its text | Instructions now say to call the tool, since proposing it is safe because a human approves |
+| Once, it kept checking for later fixes and hit the 10-call limit | The limit stopped it cleanly. Open: over-caution to be measured in the evaluation suite |
 
 To guard against overfitting the instructions to the known incidents, the evaluation suite
 (planned) will also score the agent on held-out incident types it was never tuned on.
@@ -254,8 +310,8 @@ To guard against overfitting the instructions to the known incidents, the evalua
 - [x] Token and time budgets per run
 - [x] Loop detection for repeated tool calls (automated test coming with the test suite)
 - [x] Sweeper for runs stuck between the database and Kafka
-- [ ] Human approval gate for risky actions, with idempotent execution of write tools
-- [ ] Live progress streaming (SSE)
+- [x] Human approval gate for risky actions, with idempotent execution of write tools
+- [x] Live progress streaming (SSE)
 - [ ] Integration tests with Testcontainers and a fake LLM
 - [ ] Evaluation suite: accuracy on tuned and held-out incidents, steps and tokens per run
 - [ ] Metrics dashboard, load test and chaos test (killing workers under load)
