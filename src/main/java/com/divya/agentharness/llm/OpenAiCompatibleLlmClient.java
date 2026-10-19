@@ -2,7 +2,9 @@ package com.divya.agentharness.llm;
 
 import java.net.http.HttpClient;
 import java.util.List;
+import java.util.Map;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,26 +38,38 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     }
 
     @Override
-    public String chat(List<ChatMessage> messages) {
+    public LlmResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
         if (properties.apiKey() == null || properties.apiKey().isBlank()) {
             throw new IllegalStateException("LLM_API_KEY environment variable is not set");
         }
 
+        // The provider expects each tool wrapped as {"type":"function","function":{...}}.
+        List<Map<String, Object>> toolMenu = tools.isEmpty() ? null : tools.stream()
+                .map(tool -> Map.<String, Object>of(
+                        "type", "function",
+                        "function", Map.of(
+                                "name", tool.name(),
+                                "description", tool.description(),
+                                "parameters", tool.parameters())))
+                .toList();
+
         ChatResponse response = restClient.post()
                 .uri("/chat/completions")
-                .body(new ChatRequest(properties.model(), messages))
+                .body(new ChatRequest(properties.model(), messages, toolMenu, properties.temperature()))
                 .retrieve()
                 .body(ChatResponse.class);
 
-        log.info("LLM call used {} prompt + {} completion tokens",
-                response.usage().promptTokens(), response.usage().completionTokens());
+        Usage usage = response.usage();
+        log.info("LLM call used {} prompt + {} completion tokens", usage.promptTokens(), usage.completionTokens());
 
-        return response.choices().get(0).message().content();
+        return new LlmResponse(response.choices().get(0).message(), usage.promptTokens(), usage.completionTokens());
     }
 
     // The JSON we send and receive. Spring converts these records to and from JSON for us.
 
-    private record ChatRequest(String model, List<ChatMessage> messages) {
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private record ChatRequest(String model, List<ChatMessage> messages, List<Map<String, Object>> tools,
+                               double temperature) {
     }
 
     private record ChatResponse(List<Choice> choices, Usage usage) {

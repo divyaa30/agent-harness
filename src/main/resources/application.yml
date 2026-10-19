@@ -24,6 +24,8 @@ llm:
   # Read from the LLM_API_KEY environment variable. Never write the key here.
   api-key: ${LLM_API_KEY:}
   timeout: 60s
+  # Randomness: 0 = most consistent, 1+ = more creative. Investigations want consistency.
+  temperature: 0.1
 
 management:
   endpoints:
