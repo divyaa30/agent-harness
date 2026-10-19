@@ -42,9 +42,13 @@ public class AgentLoop {
             How to investigate:
             1. Confirm the impact and when it started (get_application_stats).
             2. Find the errors and which service they come from (search_logs).
+               Then search ALL of that service's logs (no level filter) from shortly before the errors
+               started: the cause often shows up as a WARN or INFO line just before the errors.
             3. Check what changed around that time (get_recent_deploys).
             4. Only blame a deployment if the errors come from the same service and start right after it.
                A deploy that is merely close in time is not proof.
+            Separate symptom from cause: "OTPs were delayed" is a symptom. Keep asking why until a
+            tool result shows the cause.
             Base every claim on tool results. Do not guess.
 
             When you are confident, reply WITHOUT calling tools, in this format:
