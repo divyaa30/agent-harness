@@ -60,6 +60,18 @@ public class RunService {
     }
 
     /**
+     * Sends a run that seems stuck at PENDING to Kafka again (see RunSweeper).
+     * Harmless if the first message did arrive: the worker skips or resumes duplicates.
+     */
+    public void requeue(AgentRun run) {
+        String id = run.getId().toString();
+        run.markQueued();
+        runs.save(run);
+        kafka.send(KafkaTopics.AGENT_RUNS, id, id);
+        log.warn("Run {} was still PENDING, re-queued it", id);
+    }
+
+    /**
      * Does the investigation for a queued run. Safe to call more than once for the same run
      * (Kafka delivers at least once): a finished run is skipped, and an interrupted one resumes.
      */
@@ -86,7 +98,7 @@ public class RunService {
         try {
             // Each save() commits on its own, so every step is safely in the database
             // before the next one starts.
-            AgentResult result = agentLoop.investigate(run.getIncident(), history, (message, tokens) ->
+            AgentResult result = agentLoop.investigate(run.getIncident(), history, tokensBefore, (message, tokens) ->
                     steps.save(new AgentStep(
                             runId,
                             seq.incrementAndGet(),

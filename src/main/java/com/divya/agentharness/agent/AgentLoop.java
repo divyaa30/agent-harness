@@ -1,9 +1,13 @@
 package com.divya.agentharness.agent;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 import com.divya.agentharness.llm.ChatMessage;
@@ -16,6 +20,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * The doctor-and-nurse loop: ask the model, run the tools it picks, send back the
@@ -28,6 +34,9 @@ public class AgentLoop {
 
     /** Safety limit: a confused model must not loop (and spend tokens) forever. */
     static final int MAX_LLM_CALLS = 10;
+
+    /** Exact repeats of an earlier tool call that get a nudge; one more and the run stops. */
+    static final int MAX_REPEATS = 2;
 
     static final String SYSTEM_PROMPT = """
             You are an experienced production support engineer at a digital bank.
@@ -64,13 +73,22 @@ public class AgentLoop {
     private final LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final ServiceCatalog serviceCatalog;
+    private final JsonMapper jsonMapper;
+    private final int maxTokens;
+    private final Duration maxDuration;
     private final Duration stepDelay;
 
     public AgentLoop(LlmClient llmClient, ToolRegistry toolRegistry, ServiceCatalog serviceCatalog,
+                     JsonMapper jsonMapper,
+                     @Value("${agent.max-tokens:30000}") int maxTokens,
+                     @Value("${agent.max-duration:3m}") Duration maxDuration,
                      @Value("${agent.step-delay:0s}") Duration stepDelay) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.serviceCatalog = serviceCatalog;
+        this.jsonMapper = jsonMapper;
+        this.maxTokens = maxTokens;
+        this.maxDuration = maxDuration;
         this.stepDelay = stepDelay;
     }
 
@@ -80,81 +98,155 @@ public class AgentLoop {
         void onMessage(ChatMessage message, int tokens);
     }
 
+    /** Everything one investigation keeps track of while it runs. */
+    private static final class Run {
+        final List<ChatMessage> conversation;
+        final List<String> trace = new ArrayList<>();
+        final Set<String> toolCallsSeen = new HashSet<>();
+        final StepListener listener;
+        final int tokensBefore;
+        int llmCalls;
+        int toolCalls;
+        int tokens;
+        int repeats;
+
+        Run(List<ChatMessage> history, int tokensBefore, StepListener listener) {
+            // The model has no memory between calls, so this list IS the memory:
+            // every call sends the whole conversation so far.
+            this.conversation = new ArrayList<>(history);
+            this.tokensBefore = tokensBefore;
+            this.listener = listener;
+            this.llmCalls = (int) history.stream().filter(m -> m.role().equals("assistant")).count();
+            this.toolCalls = (int) history.stream().filter(m -> m.role().equals("tool")).count();
+        }
+
+        AgentResult stopped(String reason) {
+            log.warn("Investigation stopped: {}", reason);
+            trace.add("Stopped: " + reason);
+            return new AgentResult(false, "Stopped: " + reason, trace, llmCalls, toolCalls, tokens);
+        }
+    }
+
     /**
      * Runs an investigation, or continues one that was interrupted.
      *
-     * @param history  messages already saved for this run; empty for a new run
-     * @param listener called with every new message the moment it joins the conversation,
-     *                 so the caller can save it before the next step starts
+     * @param history      messages already saved for this run; empty for a new run
+     * @param tokensBefore tokens already spent on this run before a crash (0 for a new run)
+     * @param listener     called with every new message the moment it joins the conversation,
+     *                     so the caller can save it before the next step starts
      */
-    public AgentResult investigate(String incident, List<ChatMessage> history, StepListener listener) {
-        // The model has no memory between calls, so this list IS the memory:
-        // every call sends the whole conversation so far.
-        List<ChatMessage> conversation = new ArrayList<>(history);
-        List<String> trace = new ArrayList<>();
-        int llmCalls = (int) history.stream().filter(m -> m.role().equals("assistant")).count();
-        int toolCalls = (int) history.stream().filter(m -> m.role().equals("tool")).count();
-        int tokens = 0;
+    public AgentResult investigate(String incident, List<ChatMessage> history, int tokensBefore,
+                                   StepListener listener) {
+        Run run = new Run(history, tokensBefore, listener);
+        Instant deadline = Instant.now().plus(maxDuration);
 
         if (history.isEmpty()) {
-            addMessage(conversation, ChatMessage.system(SYSTEM_PROMPT.formatted(serviceCatalog.describe())), 0, listener);
-            addMessage(conversation, ChatMessage.user(incident), 0, listener);
+            addMessage(run, ChatMessage.system(SYSTEM_PROMPT.formatted(serviceCatalog.describe())), 0);
+            addMessage(run, ChatMessage.user(incident), 0);
         } else {
-            String resumed = "Resumed from " + history.size() + " saved messages (" + llmCalls + " model calls, "
-                    + toolCalls + " tool calls already done)";
+            String resumed = "Resumed from " + history.size() + " saved messages (" + run.llmCalls + " model calls, "
+                    + run.toolCalls + " tool calls already done)";
             log.info(resumed);
-            trace.add(resumed);
+            run.trace.add(resumed);
 
             // Crashed after the final answer was saved, but before the run was marked finished.
             ChatMessage last = history.get(history.size() - 1);
             if (last.role().equals("assistant") && !last.hasToolCalls()) {
-                return new AgentResult(true, last.content(), trace, llmCalls, toolCalls, 0);
+                return new AgentResult(true, last.content(), run.trace, run.llmCalls, run.toolCalls, 0);
             }
-            // Crashed after the model asked for tools, but before every result was saved:
-            // run just the missing ones. Asking the model again could give a different request.
-            toolCalls = runTools(pendingToolCalls(conversation), conversation, trace, listener, toolCalls);
+            // Remember earlier calls so repeats are still caught after a resume...
+            List<ToolCall> pending = pendingToolCalls(run.conversation);
+            history.stream().filter(ChatMessage::hasToolCalls).flatMap(m -> m.toolCalls().stream())
+                    .filter(call -> !pending.contains(call))
+                    .forEach(call -> run.toolCallsSeen.add(fingerprint(call)));
+            // ...then run the tool requests that never got a saved result. Asking the model
+            // again could give a different request.
+            runTools(run, pending);
         }
 
-        // The limit counts model calls from before a crash too, so a run that keeps
-        // crashing can't spend tokens forever.
-        while (llmCalls < MAX_LLM_CALLS) {
-            LlmResponse response = llmClient.chat(conversation, toolRegistry.specs());
-            llmCalls++;
+        while (true) {
+            String overBudget = budgetExceeded(run, deadline);
+            if (overBudget != null) {
+                return run.stopped(overBudget);
+            }
+
+            LlmResponse response = llmClient.chat(run.conversation, toolRegistry.specs());
             int used = response.promptTokens() + response.completionTokens();
-            tokens += used;
-            addMessage(conversation, response.message(), used, listener);
+            run.llmCalls++;
+            run.tokens += used;
+            addMessage(run, response.message(), used);
 
             // No tool requests means the model has given its final answer.
             if (!response.wantsTools()) {
-                trace.add("Final answer after " + llmCalls + " model calls");
-                log.info("Investigation finished: {} model calls, {} tool calls", llmCalls, toolCalls);
-                return new AgentResult(true, response.message().content(), trace, llmCalls, toolCalls, tokens);
+                run.trace.add("Final answer after " + run.llmCalls + " model calls");
+                log.info("Investigation finished: {} model calls, {} tool calls", run.llmCalls, run.toolCalls);
+                return new AgentResult(true, response.message().content(), run.trace, run.llmCalls, run.toolCalls,
+                        run.tokens);
             }
 
             // Otherwise run every tool it asked for and add each result to the conversation.
-            toolCalls = runTools(response.message().toolCalls(), conversation, trace, listener, toolCalls);
+            runTools(run, response.message().toolCalls());
+            if (run.repeats > MAX_REPEATS) {
+                return run.stopped("stuck in a loop, kept repeating tool calls it had already made");
+            }
         }
-
-        log.warn("Investigation stopped: hit the limit of {} model calls", MAX_LLM_CALLS);
-        return new AgentResult(false, "Stopped: reached the limit of " + MAX_LLM_CALLS + " model calls without an answer.",
-                trace, llmCalls, toolCalls, tokens);
     }
 
-    /** Runs each tool call, adds its result to the conversation, and returns the new tool-call count. */
-    private int runTools(List<ToolCall> calls, List<ChatMessage> conversation, List<String> trace,
-                         StepListener listener, int toolCallsSoFar) {
-        int toolCalls = toolCallsSoFar;
-        for (ToolCall call : calls) {
-            toolCalls++;
-            String step = "Step " + toolCalls + ": " + call.function().name() + " " + call.function().arguments();
-            log.info(step);
-            trace.add(step);
+    /** Null while the run is within budget; otherwise why it must stop. */
+    private String budgetExceeded(Run run, Instant deadline) {
+        // Model calls and tokens from before a crash count too, so a run that keeps
+        // crashing can't spend forever.
+        if (run.llmCalls >= MAX_LLM_CALLS) {
+            return "reached the limit of " + MAX_LLM_CALLS + " model calls without an answer";
+        }
+        int totalTokens = run.tokensBefore + run.tokens;
+        if (totalTokens >= maxTokens) {
+            return "used " + totalTokens + " tokens, over the budget of " + maxTokens;
+        }
+        if (Instant.now().isAfter(deadline)) {
+            return "took longer than the time budget of " + maxDuration.toSeconds() + "s";
+        }
+        return null;
+    }
 
-            String result = toolRegistry.execute(call);
-            addMessage(conversation, ChatMessage.toolResult(call.id(), result), 0, listener);
+    /** Runs each tool call (unless it's an exact repeat) and adds its result to the conversation. */
+    private void runTools(Run run, List<ToolCall> calls) {
+        for (ToolCall call : calls) {
+            String result;
+            if (!run.toolCallsSeen.add(fingerprint(call))) {
+                // Same tool, same inputs: the result can't have changed. Don't run it; nudge the model.
+                run.repeats++;
+                String blocked = "Repeat blocked: " + call.function().name() + " " + call.function().arguments();
+                log.info(blocked);
+                run.trace.add(blocked);
+                result = "Not run again: you already called " + call.function().name()
+                        + " with exactly these inputs, and its result is above. "
+                        + "Use a different query, or give your final answer.";
+            } else {
+                run.toolCalls++;
+                String step = "Step " + run.toolCalls + ": " + call.function().name() + " " + call.function().arguments();
+                log.info(step);
+                run.trace.add(step);
+                result = toolRegistry.execute(call);
+            }
+            addMessage(run, ChatMessage.toolResult(call.id(), result), 0);
             pauseBetweenSteps();
         }
-        return toolCalls;
+    }
+
+    /**
+     * Tool name + inputs with the keys sorted, so {"from":1,"to":2} and {"to":2,"from":1}
+     * count as the same call.
+     */
+    private String fingerprint(ToolCall call) {
+        String args = call.function().arguments();
+        try {
+            Map<String, Object> parsed = jsonMapper.readValue(args, new TypeReference<Map<String, Object>>() {});
+            args = new TreeMap<>(parsed).toString();
+        } catch (RuntimeException e) {
+            // Not valid JSON: compare the raw text instead.
+        }
+        return call.function().name() + " " + args;
     }
 
     /** Tool calls in the latest model reply that have no saved result yet. */
@@ -176,10 +268,9 @@ public class AgentLoop {
     }
 
     /** Every message goes through here: reported to the listener (to be saved), then remembered. */
-    private static void addMessage(List<ChatMessage> conversation, ChatMessage message, int tokens,
-                                   StepListener listener) {
-        listener.onMessage(message, tokens);
-        conversation.add(message);
+    private static void addMessage(Run run, ChatMessage message, int tokens) {
+        run.listener.onMessage(message, tokens);
+        run.conversation.add(message);
     }
 
     /** Optional slow-down (agent.step-delay), used to give the crash demo time to kill the app mid-run. */

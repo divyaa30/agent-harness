@@ -41,6 +41,12 @@ llm:
   # Randomness: 0 = most consistent, 1+ = more creative. Investigations want consistency.
   temperature: 0.1
 
+agent:
+  # Budgets per run. When one runs out, the run stops as FAILED with the reason.
+  max-tokens: ${AGENT_MAX_TOKENS:30000}       # counts tokens spent before a crash too
+  max-duration: ${AGENT_MAX_DURATION:3m}
+  step-delay: ${AGENT_STEP_DELAY:0s}          # demo only: pause between steps
+
 management:
   endpoints:
     web:

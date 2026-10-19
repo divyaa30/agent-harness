@@ -47,6 +47,11 @@ public class AgentRun {
         this.updatedAt = createdAt;
     }
 
+    /** Records that the run was (re)sent to Kafka just now. */
+    public void markQueued() {
+        this.updatedAt = Instant.now();
+    }
+
     public void markRunning() {
         this.status = RunStatus.RUNNING;
         this.updatedAt = Instant.now();
