@@ -23,11 +23,14 @@ public class ApprovalService implements ApprovalGate {
     private final ToolApprovalRepository approvals;
     private final AgentRunRepository runs;
     private final RunQueue queue;
+    private final RunEvents events;
 
-    public ApprovalService(ToolApprovalRepository approvals, AgentRunRepository runs, RunQueue queue) {
+    public ApprovalService(ToolApprovalRepository approvals, AgentRunRepository runs, RunQueue queue,
+                           RunEvents events) {
         this.approvals = approvals;
         this.runs = runs;
         this.queue = queue;
+        this.events = events;
     }
 
     @Override
@@ -67,7 +70,7 @@ public class ApprovalService implements ApprovalGate {
         log.warn("Run {}: {} {} by {}", runId, pending.getToolName(), status, decidedBy);
 
         run.markPending();
-        runs.save(run);
+        events.statusChanged(runs.save(run));
         try {
             queue.send(runId);
         } catch (Exception e) {

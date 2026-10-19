@@ -8,6 +8,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/runs")
@@ -26,14 +28,16 @@ public class RunController {
     private final AgentRunRepository runs;
     private final AgentStepRepository steps;
     private final ToolApprovalRepository approvals;
+    private final RunEvents runEvents;
 
     public RunController(RunService runService, ApprovalService approvalService, AgentRunRepository runs,
-                         AgentStepRepository steps, ToolApprovalRepository approvals) {
+                         AgentStepRepository steps, ToolApprovalRepository approvals, RunEvents runEvents) {
         this.runService = runService;
         this.approvalService = approvalService;
         this.runs = runs;
         this.steps = steps;
         this.approvals = approvals;
+        this.runEvents = runEvents;
     }
 
     /**
@@ -70,6 +74,17 @@ public class RunController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A reason is required to reject");
         }
         return view(approvalService.decide(id, false, request.decidedBy(), request.reason()));
+    }
+
+    /**
+     * Live progress over Server-Sent Events: every saved step so far, then each new step and
+     * status change as it happens. Closes when the run completes or fails.
+     */
+    @GetMapping(path = "/{id}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter stream(@PathVariable UUID id) {
+        AgentRun run = runs.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No run with id " + id));
+        return runEvents.watch(run, steps.findByRunIdOrderBySeq(id));
     }
 
     private RunView view(AgentRun run) {

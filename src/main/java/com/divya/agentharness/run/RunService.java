@@ -27,14 +27,16 @@ public class RunService {
     private final AgentStepRepository steps;
     private final JsonMapper jsonMapper;
     private final RunQueue queue;
+    private final RunEvents events;
 
     public RunService(AgentLoop agentLoop, AgentRunRepository runs, AgentStepRepository steps,
-                      JsonMapper jsonMapper, RunQueue queue) {
+                      JsonMapper jsonMapper, RunQueue queue, RunEvents events) {
         this.agentLoop = agentLoop;
         this.runs = runs;
         this.steps = steps;
         this.jsonMapper = jsonMapper;
         this.queue = queue;
+        this.events = events;
     }
 
     /**
@@ -93,20 +95,20 @@ public class RunService {
         AtomicInteger seq = new AtomicInteger(saved.isEmpty() ? 0 : saved.get(saved.size() - 1).getSeq());
 
         run.markRunning();
-        runs.save(run);
+        events.statusChanged(runs.save(run));
 
         try {
             // Each save() commits on its own, so every step is safely in the database
-            // before the next one starts.
+            // before the next one starts. Then anyone watching the run sees it live.
             AgentResult result = agentLoop.investigate(runId, run.getIncident(), history, tokensBefore, (message, tokens) ->
-                    steps.save(new AgentStep(
+                    events.stepSaved(steps.save(new AgentStep(
                             runId,
                             seq.incrementAndGet(),
                             message.role(),
                             message.content(),
                             message.hasToolCalls() ? jsonMapper.writeValueAsString(message.toolCalls()) : null,
                             message.toolCallId(),
-                            tokens)));
+                            tokens))));
 
             RunStatus status = switch (result.outcome()) {
                 case ANSWERED -> RunStatus.COMPLETED;
@@ -118,7 +120,9 @@ public class RunService {
             log.error("Run {} failed", runId, e);
             run.finish(RunStatus.FAILED, "Error: " + e.getMessage(), 0, 0, tokensBefore);
         }
-        return runs.save(run);
+        AgentRun finished = runs.save(run);
+        events.statusChanged(finished);
+        return finished;
     }
 
     /** Turns a saved row back into the message the model originally saw or sent. */
