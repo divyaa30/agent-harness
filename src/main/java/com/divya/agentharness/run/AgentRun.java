@@ -52,6 +52,12 @@ public class AgentRun {
         this.updatedAt = Instant.now();
     }
 
+    /** Back in the queue after a human decision, so a worker resumes it. */
+    public void markPending() {
+        this.status = RunStatus.PENDING;
+        this.updatedAt = Instant.now();
+    }
+
     public void markRunning() {
         this.status = RunStatus.RUNNING;
         this.updatedAt = Instant.now();

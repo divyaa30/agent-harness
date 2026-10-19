@@ -6,9 +6,13 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.stream.Collectors;
+
+import com.divya.agentharness.agent.AgentResult.Outcome;
 
 import com.divya.agentharness.llm.ChatMessage;
 import com.divya.agentharness.llm.LlmClient;
@@ -63,6 +67,12 @@ public class AgentLoop {
             tool result shows the cause.
             Base every claim on tool results. Do not guess.
 
+            If a deployment is clearly the cause and the problem is still ongoing (nothing has fixed
+            or rolled it back since), CALL rollback_deployment to the previous version instead of only
+            suggesting it in your answer. It is safe to call: nothing happens until a human reviews and
+            approves it. If they reject it, do not ask again: give your final answer and say what you
+            recommend instead. Never propose a rollback for a problem that has already been fixed.
+
             When you are confident, reply WITHOUT calling tools, in this format:
             Root cause: <one or two sentences>
             Evidence: <short bullet list with times and numbers from the tools>
@@ -73,19 +83,21 @@ public class AgentLoop {
     private final LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final ServiceCatalog serviceCatalog;
+    private final ApprovalGate approvalGate;
     private final JsonMapper jsonMapper;
     private final int maxTokens;
     private final Duration maxDuration;
     private final Duration stepDelay;
 
     public AgentLoop(LlmClient llmClient, ToolRegistry toolRegistry, ServiceCatalog serviceCatalog,
-                     JsonMapper jsonMapper,
+                     ApprovalGate approvalGate, JsonMapper jsonMapper,
                      @Value("${agent.max-tokens:30000}") int maxTokens,
                      @Value("${agent.max-duration:3m}") Duration maxDuration,
                      @Value("${agent.step-delay:0s}") Duration stepDelay) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.serviceCatalog = serviceCatalog;
+        this.approvalGate = approvalGate;
         this.jsonMapper = jsonMapper;
         this.maxTokens = maxTokens;
         this.maxDuration = maxDuration;
@@ -100,6 +112,7 @@ public class AgentLoop {
 
     /** Everything one investigation keeps track of while it runs. */
     private static final class Run {
+        final UUID runId;
         final List<ChatMessage> conversation;
         final List<String> trace = new ArrayList<>();
         final Set<String> toolCallsSeen = new HashSet<>();
@@ -109,8 +122,10 @@ public class AgentLoop {
         int toolCalls;
         int tokens;
         int repeats;
+        String waitingFor;  // set when a risky tool call is waiting for a human
 
-        Run(List<ChatMessage> history, int tokensBefore, StepListener listener) {
+        Run(UUID runId, List<ChatMessage> history, int tokensBefore, StepListener listener) {
+            this.runId = runId;
             // The model has no memory between calls, so this list IS the memory:
             // every call sends the whole conversation so far.
             this.conversation = new ArrayList<>(history);
@@ -123,7 +138,12 @@ public class AgentLoop {
         AgentResult stopped(String reason) {
             log.warn("Investigation stopped: {}", reason);
             trace.add("Stopped: " + reason);
-            return new AgentResult(false, "Stopped: " + reason, trace, llmCalls, toolCalls, tokens);
+            return new AgentResult(Outcome.STOPPED, "Stopped: " + reason, trace, llmCalls, toolCalls, tokens);
+        }
+
+        AgentResult waiting() {
+            return new AgentResult(Outcome.WAITING_FOR_APPROVAL, "Waiting for human approval: " + waitingFor,
+                    trace, llmCalls, toolCalls, tokens);
         }
     }
 
@@ -135,9 +155,9 @@ public class AgentLoop {
      * @param listener     called with every new message the moment it joins the conversation,
      *                     so the caller can save it before the next step starts
      */
-    public AgentResult investigate(String incident, List<ChatMessage> history, int tokensBefore,
+    public AgentResult investigate(UUID runId, String incident, List<ChatMessage> history, int tokensBefore,
                                    StepListener listener) {
-        Run run = new Run(history, tokensBefore, listener);
+        Run run = new Run(runId, history, tokensBefore, listener);
         Instant deadline = Instant.now().plus(maxDuration);
 
         if (history.isEmpty()) {
@@ -152,16 +172,19 @@ public class AgentLoop {
             // Crashed after the final answer was saved, but before the run was marked finished.
             ChatMessage last = history.get(history.size() - 1);
             if (last.role().equals("assistant") && !last.hasToolCalls()) {
-                return new AgentResult(true, last.content(), run.trace, run.llmCalls, run.toolCalls, 0);
+                return new AgentResult(Outcome.ANSWERED, last.content(), run.trace, run.llmCalls, run.toolCalls, 0);
             }
             // Remember earlier calls so repeats are still caught after a resume...
             List<ToolCall> pending = pendingToolCalls(run.conversation);
             history.stream().filter(ChatMessage::hasToolCalls).flatMap(m -> m.toolCalls().stream())
                     .filter(call -> !pending.contains(call))
                     .forEach(call -> run.toolCallsSeen.add(fingerprint(call)));
-            // ...then run the tool requests that never got a saved result. Asking the model
-            // again could give a different request.
+            // ...then run the tool requests that never got a saved result (after a crash, or a
+            // human decision). Asking the model again could give a different request.
             runTools(run, pending);
+            if (run.waitingFor != null) {
+                return run.waiting();
+            }
         }
 
         while (true) {
@@ -180,12 +203,15 @@ public class AgentLoop {
             if (!response.wantsTools()) {
                 run.trace.add("Final answer after " + run.llmCalls + " model calls");
                 log.info("Investigation finished: {} model calls, {} tool calls", run.llmCalls, run.toolCalls);
-                return new AgentResult(true, response.message().content(), run.trace, run.llmCalls, run.toolCalls,
-                        run.tokens);
+                return new AgentResult(Outcome.ANSWERED, response.message().content(), run.trace, run.llmCalls,
+                        run.toolCalls, run.tokens);
             }
 
             // Otherwise run every tool it asked for and add each result to the conversation.
             runTools(run, response.message().toolCalls());
+            if (run.waitingFor != null) {
+                return run.waiting();
+            }
             if (run.repeats > MAX_REPEATS) {
                 return run.stopped("stuck in a loop, kept repeating tool calls it had already made");
             }
@@ -209,7 +235,11 @@ public class AgentLoop {
         return null;
     }
 
-    /** Runs each tool call (unless it's an exact repeat) and adds its result to the conversation. */
+    /**
+     * Runs each tool call (unless it's an exact repeat) and adds its result to the conversation.
+     * Stops early if a risky call needs a human: that call stays without a result, so it is
+     * "pending" and gets picked up when the run resumes after the decision.
+     */
     private void runTools(Run run, List<ToolCall> calls) {
         for (ToolCall call : calls) {
             String result;
@@ -222,6 +252,31 @@ public class AgentLoop {
                 result = "Not run again: you already called " + call.function().name()
                         + " with exactly these inputs, and its result is above. "
                         + "Use a different query, or give your final answer.";
+            } else if (toolRegistry.requiresApproval(call)) {
+                Optional<ApprovalGate.Decision> decision = approvalGate.decisionFor(call.id());
+                if (decision.isEmpty()) {
+                    approvalGate.requestApproval(run.runId, call);
+                    run.waitingFor = call.function().name() + " " + call.function().arguments();
+                    String waiting = "Waiting for human approval: " + run.waitingFor;
+                    log.info(waiting);
+                    run.trace.add(waiting);
+                    return;
+                }
+                ApprovalGate.Decision d = decision.get();
+                if (d.approved()) {
+                    run.toolCalls++;
+                    String step = "Step " + run.toolCalls + " (approved by " + d.decidedBy() + "): "
+                            + call.function().name() + " " + call.function().arguments();
+                    log.info(step);
+                    run.trace.add(step);
+                    result = toolRegistry.execute(call);
+                } else {
+                    String rejected = "Rejected by " + d.decidedBy() + ": " + call.function().name();
+                    log.info(rejected);
+                    run.trace.add(rejected);
+                    result = "REJECTED by " + d.decidedBy() + ": " + d.reason() + ". Do not try this action again. "
+                            + "Give your final answer, and recommend what a human should do instead.";
+                }
             } else {
                 run.toolCalls++;
                 String step = "Step " + run.toolCalls + ": " + call.function().name() + " " + call.function().arguments();

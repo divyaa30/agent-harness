@@ -34,6 +34,12 @@ public class ToolRegistry {
         return toolsByName.values().stream().map(AgentTool::spec).toList();
     }
 
+    /** True if this call is for a tool that changes production and needs a human's approval. */
+    public boolean requiresApproval(ToolCall call) {
+        AgentTool tool = toolsByName.get(call.function().name());
+        return tool != null && tool.requiresApproval();
+    }
+
     /**
      * Runs the tool the model asked for. Never throws: problems go back to the model
      * as text ("ERROR: ..."), so it can correct itself, like a typo'd time.
@@ -46,7 +52,7 @@ public class ToolRegistry {
         }
         try {
             Map<String, Object> args = jsonMapper.readValue(call.function().arguments(), new TypeReference<>() {});
-            return tool.execute(args);
+            return tool.execute(args, call.id());
         } catch (Exception e) {
             log.warn("Tool {} failed: {}", name, e.getMessage());
             return "ERROR running " + name + ": " + e.getMessage();

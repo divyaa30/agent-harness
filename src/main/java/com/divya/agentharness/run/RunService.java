@@ -2,7 +2,6 @@ package com.divya.agentharness.run;
 
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.divya.agentharness.agent.AgentLoop;
@@ -11,7 +10,6 @@ import com.divya.agentharness.llm.ChatMessage;
 import com.divya.agentharness.llm.ToolCall;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
@@ -28,15 +26,15 @@ public class RunService {
     private final AgentRunRepository runs;
     private final AgentStepRepository steps;
     private final JsonMapper jsonMapper;
-    private final KafkaTemplate<String, String> kafka;
+    private final RunQueue queue;
 
     public RunService(AgentLoop agentLoop, AgentRunRepository runs, AgentStepRepository steps,
-                      JsonMapper jsonMapper, KafkaTemplate<String, String> kafka) {
+                      JsonMapper jsonMapper, RunQueue queue) {
         this.agentLoop = agentLoop;
         this.runs = runs;
         this.steps = steps;
         this.jsonMapper = jsonMapper;
-        this.kafka = kafka;
+        this.queue = queue;
     }
 
     /**
@@ -45,17 +43,14 @@ public class RunService {
      */
     public AgentRun createRun(String incident) {
         AgentRun run = runs.save(new AgentRun(incident));
-        String id = run.getId().toString();
         try {
-            // Wait for Kafka to confirm it stored the message, so we never reply "accepted"
-            // for a run that no worker will ever see.
-            kafka.send(KafkaTopics.AGENT_RUNS, id, id).get(5, TimeUnit.SECONDS);
+            queue.send(run.getId());
         } catch (Exception e) {
-            log.error("Could not queue run {}", id, e);
+            log.error("Could not queue run {}", run.getId(), e);
             run.finish(RunStatus.FAILED, "Error: could not queue the run: " + e.getMessage(), 0, 0, 0);
             return runs.save(run);
         }
-        log.info("Run {} queued", id);
+        log.info("Run {} queued", run.getId());
         return run;
     }
 
@@ -64,11 +59,14 @@ public class RunService {
      * Harmless if the first message did arrive: the worker skips or resumes duplicates.
      */
     public void requeue(AgentRun run) {
-        String id = run.getId().toString();
         run.markQueued();
         runs.save(run);
-        kafka.send(KafkaTopics.AGENT_RUNS, id, id);
-        log.warn("Run {} was still PENDING, re-queued it", id);
+        try {
+            queue.send(run.getId());
+            log.warn("Run {} was still PENDING, re-queued it", run.getId());
+        } catch (Exception e) {
+            log.error("Could not re-queue run {}; the sweeper will try again", run.getId(), e);
+        }
     }
 
     /**
@@ -81,8 +79,10 @@ public class RunService {
             log.warn("Run {} not found, ignoring", runId);
             return null;
         }
-        if (run.getStatus() == RunStatus.COMPLETED || run.getStatus() == RunStatus.FAILED) {
-            log.info("Run {} is already {}, skipping duplicate delivery", runId, run.getStatus());
+        if (run.getStatus() == RunStatus.COMPLETED || run.getStatus() == RunStatus.FAILED
+                || run.getStatus() == RunStatus.WAITING_APPROVAL) {
+            // Finished, or paused until a human decides (the decision re-queues it).
+            log.info("Run {} is {}, skipping this delivery", runId, run.getStatus());
             return run;
         }
 
@@ -98,7 +98,7 @@ public class RunService {
         try {
             // Each save() commits on its own, so every step is safely in the database
             // before the next one starts.
-            AgentResult result = agentLoop.investigate(run.getIncident(), history, tokensBefore, (message, tokens) ->
+            AgentResult result = agentLoop.investigate(runId, run.getIncident(), history, tokensBefore, (message, tokens) ->
                     steps.save(new AgentStep(
                             runId,
                             seq.incrementAndGet(),
@@ -108,8 +108,12 @@ public class RunService {
                             message.toolCallId(),
                             tokens)));
 
-            run.finish(result.completed() ? RunStatus.COMPLETED : RunStatus.FAILED,
-                    result.answer(), result.llmCalls(), result.toolCalls(), tokensBefore + result.totalTokens());
+            RunStatus status = switch (result.outcome()) {
+                case ANSWERED -> RunStatus.COMPLETED;
+                case STOPPED -> RunStatus.FAILED;
+                case WAITING_FOR_APPROVAL -> RunStatus.WAITING_APPROVAL;
+            };
+            run.finish(status, result.answer(), result.llmCalls(), result.toolCalls(), tokensBefore + result.totalTokens());
         } catch (Exception e) {
             log.error("Run {} failed", runId, e);
             run.finish(RunStatus.FAILED, "Error: " + e.getMessage(), 0, 0, tokensBefore);
