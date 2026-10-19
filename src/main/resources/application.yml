@@ -17,6 +17,14 @@ spring:
   flyway:
     locations: classpath:db/migration
 
+llm:
+  # Any OpenAI-compatible provider works; change these three to switch provider.
+  base-url: ${LLM_BASE_URL:https://api.groq.com/openai/v1}
+  model: ${LLM_MODEL:openai/gpt-oss-120b}
+  # Read from the LLM_API_KEY environment variable. Never write the key here.
+  api-key: ${LLM_API_KEY:}
+  timeout: 60s
+
 management:
   endpoints:
     web:
