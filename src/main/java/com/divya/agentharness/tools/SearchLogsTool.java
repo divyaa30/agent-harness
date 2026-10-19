@@ -51,9 +51,27 @@ public class SearchLogsTool implements AgentTool {
         params.put("contains", args.get("contains"));
         params.put("limit", MAX_PATTERNS);
 
+        List<String> lines = patterns(params);
+        if (lines.isEmpty() && params.get("contains") != null) {
+            // A text filter that matches nothing is usually a wording mismatch ("timeout" vs
+            // "timed out"). Show what the same window holds without it, instead of a dead end.
+            params.put("contains", null);
+            List<String> unfiltered = patterns(params);
+            if (!unfiltered.isEmpty()) {
+                return "No logs contain \"" + args.get("contains") + "\". Without that text filter, the same window has:\n"
+                        + String.join("\n", unfiltered);
+            }
+        }
+        if (lines.isEmpty()) {
+            return "No logs matched.";
+        }
+        return "Log patterns (most frequent first, max " + MAX_PATTERNS + "):\n" + String.join("\n", lines);
+    }
+
+    private List<String> patterns(Map<String, Object> params) {
         // Lesson from the detective exercise: messages contain unique application numbers,
         // so grouping by the raw message is useless. Replace every number with N first.
-        List<String> lines = jdbc.query("""
+        return jdbc.query("""
                 SELECT service, level,
                        regexp_replace(message, '[0-9]+', 'N', 'g') AS pattern,
                        count(*) AS how_many,
@@ -71,10 +89,5 @@ public class SearchLogsTool implements AgentTool {
                 "  [%s] %s x%d (first %s, last %s): %s",
                 row.getString("level"), row.getString("service"), row.getInt("how_many"),
                 row.getString("first_seen"), row.getString("last_seen"), row.getString("pattern")));
-
-        if (lines.isEmpty()) {
-            return "No logs matched.";
-        }
-        return "Log patterns (most frequent first, max " + MAX_PATTERNS + "):\n" + String.join("\n", lines);
     }
 }

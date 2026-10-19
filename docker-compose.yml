@@ -48,6 +48,33 @@ services:
       timeout: 10s
       retries: 12
 
+  # ---- Observability (optional): docker compose --profile observability up -d ----
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: agent-harness-prometheus
+    profiles: [observability]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # the app runs on the host, not in Docker
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: agent-harness-grafana
+    profiles: [observability]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"         # local dev only: no login
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/agent-harness.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
 volumes:
   postgres-data:
   kafka-data:

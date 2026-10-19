@@ -30,8 +30,13 @@ spring:
         heartbeat.interval.ms: 3000
     listener:
       ack-mode: record                # ...move it only after each run has been fully processed
+      concurrency: 3                  # one worker thread per partition
 
 llm:
+  # real = call the provider below; fake = scripted replies for load and chaos tests (no tokens)
+  mode: ${LLM_MODE:real}
+  fake:
+    latency: ${LLM_FAKE_LATENCY:300ms}       # simulated provider delay per call
   # Any OpenAI-compatible provider works; change these three to switch provider.
   base-url: ${LLM_BASE_URL:https://api.groq.com/openai/v1}
   model: ${LLM_MODEL:openai/gpt-oss-120b}
@@ -51,4 +56,4 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus,metrics

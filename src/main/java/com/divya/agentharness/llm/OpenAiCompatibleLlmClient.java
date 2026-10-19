@@ -8,6 +8,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
@@ -16,7 +17,8 @@ import org.springframework.web.client.RestClient;
  * Calls any provider that speaks the OpenAI chat-completions format (Groq, OpenRouter, ...).
  */
 @Component
-public class OpenAiCompatibleLlmClient implements LlmClient {
+@ConditionalOnProperty(name = "llm.mode", havingValue = "real", matchIfMissing = true)
+public class OpenAiCompatibleLlmClient implements ProviderLlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(OpenAiCompatibleLlmClient.class);
 

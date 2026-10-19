@@ -206,6 +206,15 @@ class AgentHarnessIntegrationTest {
         assertThat(kafkaCause).contains("Kafka broker-N unreachable");
     }
 
+    @Test
+    void aTextSearchThatFindsNothingShowsWhatTheWindowDoesHold() {
+        // The log says "timed out", the model searched "timeout": no dead end.
+        String result = tools.execute(call("t4", "search_logs", Map.of("from", "2026-10-15 12:30", "to", "2026-10-15 13:10",
+                "service", "account-service", "contains", "timeout")));
+
+        assertThat(result).startsWith("No logs contain \"timeout\"").contains("HikariPool-N - Connection is not available");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void script(LlmResponse... replies) {

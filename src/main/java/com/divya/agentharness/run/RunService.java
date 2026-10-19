@@ -28,15 +28,17 @@ public class RunService {
     private final JsonMapper jsonMapper;
     private final RunQueue queue;
     private final RunEvents events;
+    private final AgentMetrics metrics;
 
     public RunService(AgentLoop agentLoop, AgentRunRepository runs, AgentStepRepository steps,
-                      JsonMapper jsonMapper, RunQueue queue, RunEvents events) {
+                      JsonMapper jsonMapper, RunQueue queue, RunEvents events, AgentMetrics metrics) {
         this.agentLoop = agentLoop;
         this.runs = runs;
         this.steps = steps;
         this.jsonMapper = jsonMapper;
         this.queue = queue;
         this.events = events;
+        this.metrics = metrics;
     }
 
     /**
@@ -96,19 +98,27 @@ public class RunService {
 
         run.markRunning();
         events.statusChanged(runs.save(run));
+        if (!saved.isEmpty()) {
+            metrics.runResumed();
+        }
 
         try {
             // Each save() commits on its own, so every step is safely in the database
             // before the next one starts. Then anyone watching the run sees it live.
-            AgentResult result = agentLoop.investigate(runId, run.getIncident(), history, tokensBefore, (message, tokens) ->
-                    events.stepSaved(steps.save(new AgentStep(
-                            runId,
-                            seq.incrementAndGet(),
-                            message.role(),
-                            message.content(),
-                            message.hasToolCalls() ? jsonMapper.writeValueAsString(message.toolCalls()) : null,
-                            message.toolCallId(),
-                            tokens))));
+            AgentResult result = agentLoop.investigate(runId, run.getIncident(), history, tokensBefore, (message, tokens) -> {
+                events.stepSaved(steps.save(new AgentStep(
+                        runId,
+                        seq.incrementAndGet(),
+                        message.role(),
+                        message.content(),
+                        message.hasToolCalls() ? jsonMapper.writeValueAsString(message.toolCalls()) : null,
+                        message.toolCallId(),
+                        tokens)));
+                metrics.tokensUsed(tokens);
+                if (message.hasToolCalls()) {
+                    message.toolCalls().forEach(c -> metrics.toolRequested(c.function().name()));
+                }
+            });
 
             RunStatus status = switch (result.outcome()) {
                 case ANSWERED -> RunStatus.COMPLETED;
@@ -122,6 +132,7 @@ public class RunService {
         }
         AgentRun finished = runs.save(run);
         events.statusChanged(finished);
+        metrics.runEnded(finished);
         return finished;
     }
 

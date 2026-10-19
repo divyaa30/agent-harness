@@ -6,8 +6,12 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
@@ -36,27 +40,45 @@ public class RetryingLlmClient implements LlmClient {
     private final int maxAttempts;
     private final Duration initialBackoff;
     private final Duration maxBackoff;
+    private final MeterRegistry metrics;
+    private final Timer callTimer;
 
-    public RetryingLlmClient(OpenAiCompatibleLlmClient delegate,
+    @Autowired
+    public RetryingLlmClient(ProviderLlmClient delegate,
                              @Value("${llm.retry.max-attempts:5}") int maxAttempts,
                              @Value("${llm.retry.initial-backoff:1s}") Duration initialBackoff,
-                             @Value("${llm.retry.max-backoff:30s}") Duration maxBackoff) {
+                             @Value("${llm.retry.max-backoff:30s}") Duration maxBackoff,
+                             MeterRegistry metrics) {
         this.delegate = delegate;
         this.maxAttempts = maxAttempts;
         this.initialBackoff = initialBackoff;
         this.maxBackoff = maxBackoff;
+        this.metrics = metrics;
+        this.callTimer = Timer.builder("agent.llm.call.duration").description("One model call, retries included")
+                .publishPercentileHistogram().register(metrics);
+    }
+
+    /** For tests: no metrics backend. */
+    public RetryingLlmClient(ProviderLlmClient delegate, int maxAttempts, Duration initialBackoff, Duration maxBackoff) {
+        this(delegate, maxAttempts, initialBackoff, maxBackoff, new SimpleMeterRegistry());
     }
 
     @Override
     public LlmResponse chat(List<ChatMessage> messages, List<ToolSpec> tools) {
+        return callTimer.record(() -> chatWithRetries(messages, tools));
+    }
+
+    private LlmResponse chatWithRetries(List<ChatMessage> messages, List<ToolSpec> tools) {
         for (int attempt = 1; ; attempt++) {
             try {
                 return delegate.chat(messages, tools);
             } catch (RuntimeException e) {
                 if (!isTemporary(e) || attempt >= maxAttempts) {
+                    metrics.counter("agent.llm.failures", "reason", shortReason(e)).increment();
                     throw e;
                 }
                 Duration wait = waitBeforeRetry(attempt, e);
+                metrics.counter("agent.llm.retries", "reason", shortReason(e)).increment();
                 log.warn("LLM call failed ({}), attempt {}/{}; retrying in {} ms",
                         shortReason(e), attempt, maxAttempts, wait.toMillis());
                 sleep(wait);

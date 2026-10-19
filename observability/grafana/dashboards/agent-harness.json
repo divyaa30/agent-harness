@@ -1,0 +1,65 @@
+{
+  "uid": "agent-harness",
+  "title": "Agent Harness",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Runs finished per second, by outcome",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum by (outcome) (rate(agent_runs_total[1m]))", "legendFormat": "{{outcome}}" } ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Run duration, accepted to finished (p50 / p95)",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.5, sum by (le) (rate(agent_run_duration_seconds_bucket[1m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_run_duration_seconds_bucket[1m])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Model call latency, retries included (p95)",
+      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_llm_call_duration_seconds_bucket[1m])))", "legendFormat": "p95" } ]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Tokens per second",
+      "gridPos": { "x": 8, "y": 8, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "rate(agent_llm_tokens_total[1m])", "legendFormat": "tokens/s" } ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Model retries and failures per second",
+      "gridPos": { "x": 16, "y": 8, "w": 8, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (reason) (rate(agent_llm_retries_total[1m]))", "legendFormat": "retry {{reason}}" },
+        { "refId": "B", "expr": "sum by (reason) (rate(agent_llm_failures_total[1m]))", "legendFormat": "failed {{reason}}" }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Tool calls per second, by tool",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum by (tool) (rate(agent_tool_calls_total[1m]))", "legendFormat": "{{tool}}" } ]
+    },
+    {
+      "id": 7, "type": "stat", "title": "Runs resumed after a crash (total)",
+      "gridPos": { "x": 12, "y": 16, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(agent_runs_resumed_total)" } ]
+    },
+    {
+      "id": 8, "type": "stat", "title": "Kafka consumer lag (runs waiting)",
+      "gridPos": { "x": 18, "y": 16, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(kafka_consumer_fetch_manager_records_lag_max)" } ]
+    }
+  ]
+}
