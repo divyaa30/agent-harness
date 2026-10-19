@@ -1,0 +1,70 @@
+[
+  {
+    "id": "T1", "set": "tuned", "incident": "Customers say they could not open accounts on 15 October 2026, sometime in the morning. Please investigate.",
+    "rootCauseAny": ["kyc-service"], "evidenceAll": [["2.3.0"], ["nullpointer", "panvalidator"]], "mustNotBlame": [], "rollback": "forbidden"
+  },
+  {
+    "id": "T2", "set": "tuned", "incident": "KYC checks were failing for most customers around 10 AM UTC on 15 Oct 2026. What happened?",
+    "rootCauseAny": ["kyc-service"], "evidenceAll": [["2.3.0"], ["nullpointer", "panvalidator"]], "mustNotBlame": [], "rollback": "forbidden"
+  },
+  {
+    "id": "T3", "set": "tuned", "incident": "Account opening was failing with timeouts on 15 October 2026 around lunchtime. Investigate.",
+    "rootCauseAny": ["account-service", "connection pool", "hikari", "database"], "evidenceAll": [["connection pool", "hikari", "connection is not available"], ["batch", "reconciliation"]], "mustNotBlame": ["pan-verification-gateway"], "rollback": "forbidden"
+  },
+  {
+    "id": "T4", "set": "tuned", "incident": "Between 12:30 and 13:10 UTC on 15 October 2026 many account applications failed with timeouts. Find the cause.",
+    "rootCauseAny": ["account-service", "connection pool", "hikari", "database"], "evidenceAll": [["connection pool", "hikari", "connection is not available"], ["batch", "reconciliation"]], "mustNotBlame": [], "rollback": "forbidden"
+  },
+  {
+    "id": "T5", "set": "tuned", "incident": "PAN verification was failing on 15 October 2026 in the afternoon. Investigate.",
+    "rootCauseAny": ["pan-verification-gateway", "nsdl"], "evidenceAll": [["nsdl", "external", "upstream", "third-party"], ["timeout", "timed out"]], "mustNotBlame": ["notification-service", "1.8.0"], "rollback": "forbidden"
+  },
+  {
+    "id": "T6", "set": "tuned", "incident": "Around 2 PM UTC on 15 Oct 2026, KYC started failing with PAN errors for most applicants. What went wrong?",
+    "rootCauseAny": ["pan-verification-gateway", "nsdl"], "evidenceAll": [["nsdl", "external", "upstream", "third-party"], ["timeout", "timed out"]], "mustNotBlame": ["notification-service", "1.8.0"], "rollback": "forbidden"
+  },
+  {
+    "id": "T7", "set": "tuned", "incident": "Many customers got stuck during OTP on 15 October 2026 in the afternoon. Investigate.",
+    "rootCauseAny": ["kafka", "broker", "otp-service"], "evidenceAll": [["kafka", "broker"], ["lag", "consumer"]], "mustNotBlame": ["sms provider", "sms gateway"], "rollback": "forbidden"
+  },
+  {
+    "id": "T8", "set": "tuned", "incident": "OTPs were arriving several minutes late around 4 PM UTC on 15 Oct 2026. Find the root cause.",
+    "rootCauseAny": ["kafka", "broker", "otp-service"], "evidenceAll": [["kafka", "broker"], ["lag", "consumer"]], "mustNotBlame": ["sms provider", "sms gateway"], "rollback": "forbidden"
+  },
+  {
+    "id": "T9", "set": "tuned", "incident": "Valid customers were being rejected on 15 October 2026 in the evening. Investigate.",
+    "rootCauseAny": ["min_age", "minimum age", "config"], "evidenceAll": [["81"], ["config"]], "mustNotBlame": [], "rollback": "forbidden"
+  },
+  {
+    "id": "T10", "set": "tuned", "incident": "Applicants aged 25 to 40 were rejected as too young around 6 PM UTC on 15 Oct 2026. Why?",
+    "rootCauseAny": ["min_age", "minimum age", "config"], "evidenceAll": [["81"], ["config"]], "mustNotBlame": [], "rollback": "forbidden"
+  },
+  {
+    "id": "T11", "set": "tuned", "incident": "Customers who opened accounts on the evening of 15 October 2026 say they never received a welcome email. It is still happening right now. Investigate.",
+    "rootCauseAny": ["notification-service"], "evidenceAll": [], "mustNotBlame": [], "rollback": "required", "rollbackService": "notification-service", "rollbackVersion": "1.8.0"
+  },
+  {
+    "id": "H1", "set": "heldout", "incident": "Account opening kept failing with service unavailable errors around noon UTC on 14 October 2026. Investigate.",
+    "rootCauseAny": ["memory", "heap", "outofmemory", "oom"], "evidenceAll": [["outofmemory", "heap", "oom"], ["3.0.5", "cache"]], "mustNotBlame": [], "rollback": "forbidden"
+  },
+  {
+    "id": "H2", "set": "heldout", "incident": "account-service kept restarting late in the morning of 14 Oct 2026 and customers could not open accounts. What happened?",
+    "rootCauseAny": ["memory", "heap", "outofmemory", "oom"], "evidenceAll": [["outofmemory", "heap", "oom"], ["3.0.5", "cache"]], "mustNotBlame": [], "rollback": "forbidden"
+  },
+  {
+    "id": "H3", "set": "heldout", "incident": "PAN verification failed for almost everyone on the afternoon of 14 October 2026. Investigate.",
+    "rootCauseAny": ["certificate", "tls", "pkix"], "evidenceAll": [["certificate", "tls", "pkix"], ["expired", "expir"]], "mustNotBlame": ["2.0.1"], "rollback": "forbidden"
+  },
+  {
+    "id": "H4", "set": "heldout", "incident": "Around 2 PM UTC on 14 Oct 2026 customers saw PAN check errors during account opening. Find the root cause.",
+    "rootCauseAny": ["certificate", "tls", "pkix"], "evidenceAll": [["certificate", "tls", "pkix"], ["expired", "expir"]], "mustNotBlame": ["2.0.1"], "rollback": "forbidden"
+  },
+  {
+    "id": "H5", "set": "heldout", "incident": "KYC was extremely slow and failing on the evening of 14 October 2026. Investigate.",
+    "rootCauseAny": ["index"], "evidenceAll": [["index"], ["2.2.3", "slow query", "sequential scan", "full table scan"]], "mustNotBlame": [], "rollback": "forbidden"
+  },
+  {
+    "id": "H6", "set": "heldout", "incident": "Around 5 PM UTC on 14 Oct 2026 a lot of applications failed at the KYC step. What went wrong?",
+    "rootCauseAny": ["index"], "evidenceAll": [["index"], ["2.2.3", "slow query", "sequential scan", "full table scan"]], "mustNotBlame": [], "rollback": "forbidden"
+  }
+]
