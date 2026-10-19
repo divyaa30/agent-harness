@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      # Unit tests plus integration tests against real Postgres and Kafka (Testcontainers
+      # uses the runner's Docker). The model is scripted, so no API key is needed.
+      - name: Build and test
+        run: ./mvnw -B verify
