@@ -25,7 +25,9 @@ import com.divya.agentharness.run.ApprovalService;
 import com.divya.agentharness.run.RunService;
 import com.divya.agentharness.run.RunStatus;
 import com.divya.agentharness.run.RunSweeper;
+import com.divya.agentharness.run.ToolApprovalRepository;
 import com.divya.agentharness.tools.ToolRegistry;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -65,8 +67,15 @@ class AgentHarnessIntegrationTest {
     @Autowired ToolRegistry tools;
     @Autowired AgentRunRepository runs;
     @Autowired AgentStepRepository steps;
+    @Autowired ToolApprovalRepository approvals;
     @Autowired JdbcTemplate jdbc;
     @Autowired JsonMapper json;
+
+    /** Each test starts from the fake bank as seeded: rollbacks made by earlier tests are undone. */
+    @BeforeEach
+    void undoAgentRollbacks() {
+        jdbc.update("DELETE FROM deployments WHERE idempotency_key IS NOT NULL");
+    }
 
     @Test
     void aQueuedRunGoesThroughKafkaAndUsesTheRealToolsOnTheFakeBank() {
@@ -179,6 +188,48 @@ class AgentHarnessIntegrationTest {
 
         assertThat(result).startsWith("ERROR").contains("never deployed");
         assertThat(rollbacksFor("r3")).isZero();
+    }
+
+    @Test
+    void theRollbackToolRefusesTheVersionAlreadyRunning() {
+        // kyc-service was rolled back to 2.2.4 at 10:52 on 15 Oct, and nothing since.
+        String result = tools.execute(call("r4", "rollback_deployment",
+                Map.of("service", "kyc-service", "to_version", "2.2.4", "reason", "test")));
+
+        assertThat(result).startsWith("ERROR").contains("already running 2.2.4");
+        assertThat(rollbacksFor("r4")).isZero();
+    }
+
+    @Test
+    void theRollbackToolRefusesToGoMoreThanOneStepBack() {
+        // The held-out miss (H2): account-service 3.0.5 was rolled back to 3.0.4 at 12:35 on 14 Oct,
+        // then 3.1.1 and 3.1.2 were deployed on 15 Oct. Going back to 3.0.4 would undo both.
+        String result = tools.execute(call("r5", "rollback_deployment",
+                Map.of("service", "account-service", "to_version", "3.0.4", "reason", "test")));
+
+        assertThat(result).startsWith("ERROR").contains("now running 3.1.2").contains("one step back, to 3.1.1");
+        assertThat(rollbacksFor("r5")).isZero();
+    }
+
+    @Test
+    void aRollbackThatMakesNoSenseIsNeverSentForApproval() {
+        ToolCall rollback = call("r6", "rollback_deployment",
+                Map.of("service", "account-service", "to_version", "3.0.4", "reason", "OOM after the 3.0.5 cache"));
+        AtomicInteger callNo = new AtomicInteger();
+        when(llm.chat(any(), any())).thenAnswer(inv -> {
+            if (callNo.incrementAndGet() == 1) {
+                return new LlmResponse(new ChatMessage("assistant", null, List.of(rollback), null), 100, 50);
+            }
+            List<ChatMessage> conversation = inv.getArgument(0);
+            return answer("Seen: " + conversation.get(conversation.size() - 1).content());
+        });
+
+        AgentRun run = runService.createRun("account-service kept restarting late in the morning of 14 Oct 2026.");
+        AgentRun done = waitFor(run.getId(), RunStatus.COMPLETED);
+
+        assertThat(done.getResult()).contains("now running 3.1.2");
+        assertThat(approvals.findByRunIdOrderByRequestedAt(run.getId())).isEmpty();
+        assertThat(rollbacksFor("r6")).isZero();
     }
 
     @Test

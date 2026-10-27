@@ -254,28 +254,36 @@ public class AgentLoop {
                         + "Use a different query, or give your final answer.";
             } else if (toolRegistry.requiresApproval(call)) {
                 Optional<ApprovalGate.Decision> decision = approvalGate.decisionFor(call.id());
-                if (decision.isEmpty()) {
+                String refusal = decision.isEmpty() ? toolRegistry.precheck(call) : null;
+                if (refusal != null) {
+                    // The request makes no sense (e.g. a rollback that already happened): don't ask a human.
+                    String refused = "Refused before approval: " + call.function().name() + " " + call.function().arguments();
+                    log.info(refused);
+                    run.trace.add(refused);
+                    result = refusal;
+                } else if (decision.isEmpty()) {
                     approvalGate.requestApproval(run.runId, call);
                     run.waitingFor = call.function().name() + " " + call.function().arguments();
                     String waiting = "Waiting for human approval: " + run.waitingFor;
                     log.info(waiting);
                     run.trace.add(waiting);
                     return;
-                }
-                ApprovalGate.Decision d = decision.get();
-                if (d.approved()) {
-                    run.toolCalls++;
-                    String step = "Step " + run.toolCalls + " (approved by " + d.decidedBy() + "): "
-                            + call.function().name() + " " + call.function().arguments();
-                    log.info(step);
-                    run.trace.add(step);
-                    result = toolRegistry.execute(call);
                 } else {
-                    String rejected = "Rejected by " + d.decidedBy() + ": " + call.function().name();
-                    log.info(rejected);
-                    run.trace.add(rejected);
-                    result = "REJECTED by " + d.decidedBy() + ": " + d.reason() + ". Do not try this action again. "
-                            + "Give your final answer, and recommend what a human should do instead.";
+                    ApprovalGate.Decision d = decision.get();
+                    if (d.approved()) {
+                        run.toolCalls++;
+                        String step = "Step " + run.toolCalls + " (approved by " + d.decidedBy() + "): "
+                                + call.function().name() + " " + call.function().arguments();
+                        log.info(step);
+                        run.trace.add(step);
+                        result = toolRegistry.execute(call);
+                    } else {
+                        String rejected = "Rejected by " + d.decidedBy() + ": " + call.function().name();
+                        log.info(rejected);
+                        run.trace.add(rejected);
+                        result = "REJECTED by " + d.decidedBy() + ": " + d.reason() + ". Do not try this action again. "
+                                + "Give your final answer, and recommend what a human should do instead.";
+                    }
                 }
             } else {
                 run.toolCalls++;

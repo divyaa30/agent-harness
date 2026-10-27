@@ -40,6 +40,20 @@ public class ToolRegistry {
         return tool != null && tool.requiresApproval();
     }
 
+    /** The tool's own check of a risky call before a human sees it: null if it makes sense. */
+    public String precheck(ToolCall call) {
+        AgentTool tool = toolsByName.get(call.function().name());
+        if (tool == null) {
+            return null;
+        }
+        try {
+            Map<String, Object> args = jsonMapper.readValue(call.function().arguments(), new TypeReference<>() {});
+            return tool.precheck(args);
+        } catch (Exception e) {
+            return "ERROR checking " + call.function().name() + ": " + e.getMessage();
+        }
+    }
+
     /**
      * Runs the tool the model asked for. Never throws: problems go back to the model
      * as text ("ERROR: ..."), so it can correct itself, like a typo'd time.

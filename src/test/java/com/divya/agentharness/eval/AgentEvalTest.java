@@ -13,8 +13,11 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import com.divya.agentharness.llm.ToolCall;
 import com.divya.agentharness.run.AgentRun;
 import com.divya.agentharness.run.AgentRunRepository;
+import com.divya.agentharness.run.AgentStep;
+import com.divya.agentharness.run.AgentStepRepository;
 import com.divya.agentharness.run.RunService;
 import com.divya.agentharness.run.RunStatus;
 import com.divya.agentharness.run.ToolApproval;
@@ -55,6 +58,7 @@ class AgentEvalTest {
     @Autowired RunService runService;
     @Autowired AgentRunRepository runs;
     @Autowired ToolApprovalRepository approvals;
+    @Autowired AgentStepRepository steps;
     @Autowired JsonMapper json;
 
     record Scenario(String id, String set, String incident, List<String> rootCauseAny, List<List<String>> evidenceAll,
@@ -63,7 +67,7 @@ class AgentEvalTest {
 
     record Outcome(Scenario scenario, String status, boolean finished, boolean rightCause, boolean evidence,
                    boolean noRedHerring, boolean rollbackOk, int llmCalls, int toolCalls, int tokens, long millis,
-                   String answer) {
+                   String answer, List<String> steps) {
         boolean passed() {
             return finished && rightCause && evidence && noRedHerring && rollbackOk;
         }
@@ -84,7 +88,7 @@ class AgentEvalTest {
             Instant start = Instant.now();
             AgentRun run = runService.process(runs.save(new AgentRun(s.incident())).getId());
             Outcome o = score(s, run, approvals.findByRunIdOrderByRequestedAt(run.getId()),
-                    Duration.between(start, Instant.now()).toMillis());
+                    Duration.between(start, Instant.now()).toMillis(), trace(run));
             outcomes.add(o);
             System.out.printf("EVAL %-4s %-8s %s  calls=%d tools=%d tokens=%d %ds%n", s.id(), s.set(),
                     o.passed() ? "PASS" : "FAIL", o.llmCalls(), o.toolCalls(), o.tokens(), o.millis() / 1000);
@@ -99,7 +103,7 @@ class AgentEvalTest {
 
     // ------------------------------------------------------------------ scoring
 
-    static Outcome score(Scenario s, AgentRun run, List<ToolApproval> requested, long millis) {
+    static Outcome score(Scenario s, AgentRun run, List<ToolApproval> requested, long millis, List<String> steps) {
         String answer = run.getResult() == null ? "" : run.getResult();
         String text = normalise(answer);
         String rootCause = rootCauseSection(text);
@@ -118,7 +122,28 @@ class AgentEvalTest {
                 : requested.isEmpty();
 
         return new Outcome(s, run.getStatus().name(), finished, rightCause, evidence, noRedHerring, rollbackOk,
-                run.getLlmCalls(), run.getToolCalls(), run.getTotalTokens(), millis, answer);
+                run.getLlmCalls(), run.getToolCalls(), run.getTotalTokens(), millis, answer, steps);
+    }
+
+    /**
+     * What the agent did, step by step: each tool it asked for (with the inputs, like the time
+     * window) and the first lines of what came back. The database is thrown away after the
+     * suite, so without this a miss can only be guessed at.
+     */
+    private List<String> trace(AgentRun run) {
+        List<String> lines = new ArrayList<>();
+        for (AgentStep step : steps.findByRunIdOrderBySeq(run.getId())) {
+            if (step.getToolCalls() != null) {
+                for (ToolCall call : json.readValue(step.getToolCalls(), new TypeReference<List<ToolCall>>() {})) {
+                    lines.add("→ " + call.function().name() + " " + call.function().arguments());
+                }
+            } else if ("tool".equals(step.getRole())) {
+                String[] result = step.getContent().split("\n");
+                String preview = String.join(" | ", Arrays.copyOf(result, Math.min(result.length, 4)));
+                lines.add("  ← " + preview + (result.length > 4 ? " | … (" + result.length + " lines)" : ""));
+            }
+        }
+        return lines;
     }
 
     /** Lower case, markdown stripped, and the unicode dashes models like replaced with "-". */
@@ -175,6 +200,10 @@ class AgentEvalTest {
             md.append("\n### ").append(o.scenario().id()).append(" (").append(o.status()).append(")\n\n")
                     .append("> ").append(o.scenario().incident()).append("\n\n")
                     .append(o.answer().replace("\n", "\n\n")).append("\n");
+            if (!o.steps().isEmpty()) {
+                md.append("\n<details><summary>Steps</summary>\n\n```\n")
+                        .append(String.join("\n", o.steps())).append("\n```\n\n</details>\n");
+            }
         }
         Path dir = Path.of("target", "eval");
         Files.createDirectories(dir);

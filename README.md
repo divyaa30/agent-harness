@@ -17,7 +17,7 @@ reliable, observable and safe enough for backend systems.
 | Chaos: hard kill with 200 runs queued or in flight | **200/200 completed, 0 lost, 0 repeated**; the 3 in-flight runs resumed from saved steps |
 | Load: 300 runs offered at 5/s (2.5× worker capacity) | `POST /runs` **p95 38 ms**, 300/300 completed, 1.99 runs/s on 3 workers |
 | Harness overhead per run (9 DB writes, 3 SQL tools, Kafka) | about **0.3 s** on top of model time |
-| Automated tests | **29** (20 unit, 9 integration with Testcontainers), run by GitHub Actions on every push |
+| Automated tests | **33** (21 unit, 12 integration with Testcontainers), run by GitHub Actions on every push |
 
 Details: [eval baseline](evals/2026-10-19-baseline.md), [re-run](evals/2026-10-19-rerun-T3-T4.md),
 [load and chaos results](loadtest/RESULTS.md).
@@ -144,6 +144,14 @@ Every tool except one only reads. `rollback_deployment` changes production, so i
 same approved call again, the second attempt changes nothing. The tool also refuses to roll back
 to a version the service never ran.
 
+**One step back only.** A rollback may only go to the version deployed just before the one
+running now. Asking for the version already running is refused (the problem may already be
+fixed), and so is going further back, which would also undo every change deployed since. This is
+checked in code **before** a human is asked, so nobody is asked to approve a rollback that makes no
+sense; the refusal goes back to the model, which can rethink. It is checked again just before the
+rollback runs, in case something was deployed while the human was deciding. Trade-off: the agent
+can't propose a rollback of two or more versions; a human has to do that by hand.
+
 Verified: approve (rollback applied once, run completed), second approve (`409`), replaying the
 same rollback (`INSERT 0 0`, still one rollback), reject without a reason (`400`), and reject
 with a reason (no rollback; the agent's report adopted the team's alternative fix).
@@ -202,16 +210,19 @@ It is generated without randomness, so every evaluation is the same exam with a 
 
 ## Testing and evaluation
 
-### Automated tests (29, on every push)
+### Automated tests (33, on every push)
 
-- **Unit tests (20)** drive the agent loop with a scripted fake model: tool use, the call limit,
+- **Unit tests (21)** drive the agent loop with a scripted fake model: tool use, the call limit,
   token and time budgets (including tokens spent before a crash), loop detection with reordered
-  JSON keys, resume after a crash, and the approval gate (pause, approved, rejected). The retry
-  client's backoff, jitter, `Retry-After` handling and give-up rules are tested too.
-- **Integration tests (9)** start a real Postgres and Kafka with **Testcontainers** and script only
+  JSON keys, resume after a crash, and the approval gate (pause, approved, rejected, and a request
+  refused before any human is asked). The retry client's backoff, jitter, `Retry-After` handling
+  and give-up rules are tested too.
+- **Integration tests (12)** start a real Postgres and Kafka with **Testcontainers** and script only
   the model: a run through Kafka on the real fake bank, resume without repeated work, a duplicate
   delivery skipped, approve and reject with an idempotent rollback and `409` on a second decision,
-  the sweeper, the search fallback, and the fake bank's answer key.
+  rollbacks refused when they aren't one step back (including the held-out miss's exact request,
+  which now finishes without asking anyone), the sweeper, the search fallback, and the fake bank's
+  answer key.
 - **GitHub Actions** runs `./mvnw verify` on every push.
 
 ```bash
@@ -236,8 +247,15 @@ What failed, and what was done about it:
 - "Lunchtime" was read as 12:00 to 17:00, a window with two incidents, and they were mixed up.
   Left open rather than adding a rule for that one phrase.
 - On a held-out incident the agent correctly found a memory leak, then **proposed a rollback for
-  a problem already rolled back**. The approval gate caught it. It's reported, not tuned away, so
-  the held-out set stays held-out.
+  a problem already rolled back**. The approval gate caught it. The likely reason: the report said
+  "late in the morning", the instructions define morning as 06:00–12:00, and the rollback happened
+  at 12:35, so the agent probably never looked that far. This is unconfirmed, because that run's
+  steps weren't saved; the eval report now saves every run's steps, so the next run will show it.
+  The prompt wasn't changed for it, so the held-out set stays held-out. Instead, the rollback tool
+  now refuses any rollback that isn't **one step back** from what's running (account-service had
+  since moved on to 3.1.2, so going back to 3.0.4 would also have undone two later releases).
+  That is a code rule, not better reasoning: if H2 passes in a future run, it's because the
+  rollback was refused, and the results above are still from the original run.
 
 Single runs vary even at temperature 0.1, so the next step is running each scenario several times
 to measure consistency.
@@ -382,7 +400,7 @@ Each failure was found by reading the saved step trace or an eval report, then f
 | Grouping logs by raw message failed (every line had a unique ID) | `search_logs` groups numbers into patterns. Trade-off: it also masks useful numbers like broker IDs |
 | Searched for "timeout" when the log said "timed out" | A text search that matches nothing shows the unfiltered window instead of a dead end |
 | Diagnosed the ongoing incident but only *suggested* a rollback in text | Instructions say to call the tool, because a human approves it |
-| Proposed a rollback for an incident already rolled back (held-out) | Caught by the approval gate; reported rather than tuned away |
+| Proposed a rollback for an incident already rolled back (held-out), likely because it stayed inside the "morning" window and the rollback came at 12:35 | Caught by the approval gate. The prompt wasn't tuned for it; instead the rollback tool now refuses, in code and before a human is asked, any rollback that isn't one step back from the version running now. Eval reports now save each run's steps, so a miss can be traced instead of guessed |
 
 ---
 
@@ -397,6 +415,13 @@ Each failure was found by reading the saved step trace or an eval report, then f
 - **Single-instance SSE.** Watchers live in memory; several instances would need Redis pub/sub or a
   Kafka topic for step events.
 - **No authentication yet.** Approvers should be authenticated users, with an audit log.
+- **Rollbacks go one step back only.** Safe by default, but a real incident sometimes needs a
+  rollback of two or more versions; today a human does that by hand. The check also trusts the
+  deployments table to show what is really running.
+- **No "what's happening now" tool.** Every tool works on a time window the model chooses, so
+  whether a problem is still ongoing depends on the model picking a window that reaches the
+  present. A tool reporting each service's current version and error rate would answer it
+  directly.
 - **Real tools.** Production versions would call Elasticsearch, the deploy pipeline, Prometheus and
   the Kafka admin API behind the same tool interface; team runbooks would come in through a
   retrieval (RAG) tool, and the tools could be exposed over MCP.

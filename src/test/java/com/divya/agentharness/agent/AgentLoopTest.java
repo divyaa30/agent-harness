@@ -244,6 +244,20 @@ class AgentLoopTest {
     }
 
     @Test
+    void aRiskyCallThatFailsItsPrecheckIsNeverSentToAHuman() {
+        rollback.refusal = "ERROR: notification-service is already running 1.8.0";
+        llm.reply(toolCall("r1", "rollback_deployment", "{\"service\":\"notification-service\"}"));
+        llm.reply(answer("Already rolled back; no action needed"));
+
+        AgentResult result = investigate(loop(), List.of());
+
+        assertThat(gate.requested).isEmpty();
+        assertThat(rollback.executions).isZero();
+        assertThat(saved).anyMatch(m -> "r1".equals(m.toolCallId()) && m.content().contains("already running"));
+        assertThat(result.outcome()).isEqualTo(Outcome.ANSWERED);
+    }
+
+    @Test
     void anApprovedRiskyToolRunsWhenTheRunResumes() {
         gate.decisions.put("r1", new ApprovalGate.Decision(true, "divya", "clear evidence"));
         List<ChatMessage> history = List.of(
@@ -329,6 +343,7 @@ class AgentLoopTest {
     static final class CountingTool implements AgentTool {
         final String name;
         final boolean risky;
+        String refusal;  // what precheck returns; null = the request makes sense
         int executions;
 
         CountingTool(String name, boolean risky) {
@@ -350,6 +365,11 @@ class AgentLoopTest {
         @Override
         public boolean requiresApproval() {
             return risky;
+        }
+
+        @Override
+        public String precheck(Map<String, Object> args) {
+            return refusal;
         }
     }
 

@@ -31,4 +31,12 @@ public interface AgentTool {
     default boolean requiresApproval() {
         return false;
     }
+
+    /**
+     * For tools that need approval: checks the request before a human is asked. Returns null if
+     * it makes sense, or why it doesn't (that goes back to the model and nobody is asked).
+     */
+    default String precheck(Map<String, Object> args) {
+        return null;
+    }
 }
